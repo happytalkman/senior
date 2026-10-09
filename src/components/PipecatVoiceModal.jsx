@@ -1,21 +1,23 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Mic, MicOff, Volume2, Sparkles, X, Heart, Radio, Activity, RefreshCw, MessageSquare, Repeat } from 'lucide-react';
 import confetti from 'canvas-confetti';
-import { speakText, stopSpeech, playBase64Audio } from '../utils/speech';
+import { speakText, stopSpeech } from '../utils/speech';
+import { queryOpenRouterLLM } from '../utils/llm';
 
 export default function PipecatVoiceModal({ onClose }) {
-  const [connectionStatus, setConnectionStatus] = useState('connecting'); // 'connecting' | 'connected' | 'error'
   const [isListening, setIsListening] = useState(false);
+  const [isAiProcessing, setIsAiProcessing] = useState(false);
   const [isAiSpeaking, setIsAiSpeaking] = useState(false);
   const [isMultiTurn, setIsMultiTurn] = useState(true); // Continuous multi-turn voice mode
   const [turnCount, setTurnCount] = useState(0);
   const [transcript, setTranscript] = useState('');
-  const [aiResponse, setAiResponse] = useState('어르신, 하시고 싶은 말씀을 편하게 말씀해 주셔요. 끊김 없이 이어서 대화 나누실 수 있습니다...');
+  const [aiResponse, setAiResponse] = useState('어르신, 하시고 싶은 말씀을 편하게 말씀해 주셔요. 질문하시면 AI가 듣고 답변을 소리로 읽어드립니다...');
 
-  const wsRef = useRef(null);
+  // Message History for Multi-turn Conversation Context
+  const [conversationHistory, setConversationHistory] = useState([]);
+
   const recognitionRef = useRef(null);
   const isAiSpeakingRef = useRef(false);
-  const currentAiResponseRef = useRef('');
 
   const voicePresets = [
     "오늘 날씨가 어떤가요?",
@@ -38,11 +40,11 @@ export default function PipecatVoiceModal({ onClose }) {
         console.warn("Recognition start error/already running:", err);
       }
     } else {
-      // Fallback simulation if mic is blocked
+      // Fallback prompt simulation if mic blocked
       setTimeout(() => {
-        const simulatedText = "오늘 날씨 참 좋네요. 경로당 프로그램도 알려주세요.";
+        const simulatedText = "오늘 날씨 참 좋네요. 경로당 식당 메뉴도 알려주세요.";
         setTranscript(simulatedText);
-        sendVoiceToPipecat(simulatedText);
+        handleUserSpeechInput(simulatedText);
       }, 3000);
     }
   };
@@ -56,86 +58,8 @@ export default function PipecatVoiceModal({ onClose }) {
     }
   };
 
-  // Connect to Pipecat WebSocket server
+  // Initialize SpeechRecognition
   useEffect(() => {
-    const ws = new WebSocket('ws://localhost:8000/ws/pipecat');
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      setConnectionStatus('connected');
-      setTimeout(() => {
-        startListening();
-      }, 800);
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'connected') {
-          console.log('[Pipecat WS Connected]:', data.message);
-        } else if (data.type === 'text_delta') {
-          setAiResponse(prev => {
-            const nextText = (prev === '어르신, 하시고 싶은 말씀을 편하게 말씀해 주셔요. 끊김 없이 이어서 대화 나누실 수 있습니다...') ? data.text : prev + data.text;
-            currentAiResponseRef.current = nextText;
-            return nextText;
-          });
-        } else if (data.type === 'neural_audio' && data.audio_base64) {
-          // Play ultra-natural Neural Voice
-          setIsAiSpeaking(true);
-          isAiSpeakingRef.current = true;
-          stopListening();
-
-          playBase64Audio(data.audio_base64, data.text || currentAiResponseRef.current, () => {
-            setIsAiSpeaking(false);
-            isAiSpeakingRef.current = false;
-            confetti({ particleCount: 30, spread: 50, origin: { y: 0.6 } });
-
-            // AUTOMATIC MULTI-TURN RE-ACTIVATION
-            if (isMultiTurn) {
-              setTranscript('');
-              setTimeout(() => {
-                startListening();
-              }, 600);
-            }
-          });
-        } else if (data.type === 'status') {
-          if (data.status === 'speaking_start') {
-            setIsAiSpeaking(true);
-            isAiSpeakingRef.current = true;
-            stopListening();
-            setAiResponse('');
-            currentAiResponseRef.current = '';
-          } else if (data.status === 'speaking_end') {
-            // Fallback audio trigger if neural_audio frame did not arrive
-            setTimeout(() => {
-              if (isAiSpeakingRef.current && currentAiResponseRef.current) {
-                speakText(currentAiResponseRef.current, () => {
-                  setIsAiSpeaking(false);
-                  isAiSpeakingRef.current = false;
-                  if (isMultiTurn) {
-                    setTranscript('');
-                    setTimeout(startListening, 600);
-                  }
-                });
-              }
-            }, 300);
-          }
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    };
-
-    ws.onerror = (err) => {
-      console.error('Pipecat WebSocket error:', err);
-      setConnectionStatus('error');
-    };
-
-    ws.onclose = () => {
-      setConnectionStatus('disconnected');
-    };
-
-    // Initialize Web Speech API for continuous voice capture
     if (typeof window !== 'undefined' && ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       const recognition = new SpeechRecognition();
@@ -152,7 +76,7 @@ export default function PipecatVoiceModal({ onClose }) {
 
         if (event.results[event.results.length - 1].isFinal) {
           stopListening();
-          sendVoiceToPipecat(currentTranscript);
+          handleUserSpeechInput(currentTranscript);
         }
       };
 
@@ -165,38 +89,72 @@ export default function PipecatVoiceModal({ onClose }) {
       recognitionRef.current = recognition;
     }
 
+    // Auto start initial listening
+    const timer = setTimeout(() => {
+      startListening();
+    }, 600);
+
     return () => {
-      ws.close();
+      clearTimeout(timer);
       stopSpeech();
       if (recognitionRef.current) recognitionRef.current.stop();
     };
-  }, [isMultiTurn]);
+  }, []);
 
-  const sendVoiceToPipecat = (text) => {
-    if (!text.trim()) return;
-    setTranscript(text);
-    setTurnCount(prev => prev + 1);
+  // Main Pipeline: STT -> LLM (OpenRouter) -> TTS (Voice Output) -> Multi-turn Auto Re-listen
+  const handleUserSpeechInput = async (userText) => {
+    if (!userText.trim()) return;
+    setTranscript(userText);
     stopSpeech();
+    stopListening();
+    setIsAiProcessing(true);
+    setTurnCount(prev => prev + 1);
 
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'user_speak',
-        text: text
-      }));
-    } else {
-      // Fallback
-      setIsAiSpeaking(true);
-      isAiSpeakingRef.current = true;
-      const fallbackMsg = `어르신, "${text}" 말씀 잘 들었습니다! 언제나 따뜻하고 건강한 하루 보내셔요.`;
-      setAiResponse(fallbackMsg);
-      speakText(fallbackMsg, () => {
-        setIsAiSpeaking(false);
-        isAiSpeakingRef.current = false;
-        if (isMultiTurn) {
-          setTimeout(startListening, 600);
-        }
-      });
+    // Update history
+    const newHistory = [...conversationHistory, { role: "user", content: userText }];
+    setConversationHistory(newHistory);
+
+    // 1. LLM API Query (OpenRouter GPT-4o-mini / Llama 3.3)
+    let llmResponse = await queryOpenRouterLLM(newHistory);
+
+    // Local Fallback if LLM API network unavailable
+    if (!llmResponse) {
+      const t = userText.toLowerCase();
+      if (t.includes('안녕') || t.includes('반갑') || t.includes('시작')) {
+        llmResponse = "어르신, 반갑습니다! 대한노인회 온기동행 AI 음성 말벗입니다. 오늘 식사는 따뜻하게 잘 드셨나요?";
+      } else if (t.includes('외롭') || t.includes('적적') || t.includes('쓸쓸')) {
+        llmResponse = "어르신, 혼자 계실 때 마음이 쓸쓸하시지요. 제가 늘 곁에서 어르신의 이야기를 들을 테니 편하게 말씀해주세요.";
+      } else if (t.includes('날씨') || t.includes('오늘')) {
+        llmResponse = "오늘 하늘이 참 푸르고 맑은 햇살이 내려오고 있어요. 가벼운 외투를 입으시고 동네 산책 다녀오시면 마음이 쾌청해질 거예요.";
+      } else if (t.includes('일자리') || t.includes('일') || t.includes('청춘')) {
+        llmResponse = "어르신의 깊은 경험과 삶의 지혜는 동네의 보물입니다. 초등학교 등하교 도우미와 경로당 식사 도우미 등 보람찬 일자리가 기다리고 있습니다.";
+      } else {
+        llmResponse = `어르신 말씀에 가슴이 참 따뜻해집니다. 말씀해주신 ${userText}에 대해 이야기 나누어 주셔서 감사해요. 늘 건강하세요.`;
+      }
     }
+
+    // Append AI response to history
+    setConversationHistory([...newHistory, { role: "assistant", content: llmResponse }]);
+    setAiResponse(llmResponse);
+    setIsAiProcessing(false);
+
+    // 2. TTS Voice Output (Speak response out loud!)
+    setIsAiSpeaking(true);
+    isAiSpeakingRef.current = true;
+    confetti({ particleCount: 35, spread: 60, origin: { y: 0.6 } });
+
+    speakText(llmResponse, () => {
+      setIsAiSpeaking(false);
+      isAiSpeakingRef.current = false;
+
+      // 3. Multi-Turn Auto Re-listening Loop
+      if (isMultiTurn) {
+        setTranscript('');
+        setTimeout(() => {
+          startListening();
+        }, 500);
+      }
+    });
   };
 
   const toggleMic = () => {
@@ -236,7 +194,7 @@ export default function PipecatVoiceModal({ onClose }) {
           <div className="flex items-center justify-center gap-2">
             <span className="inline-flex items-center gap-1.5 bg-rose-100 text-rose-800 text-xs font-black px-3.5 py-1 rounded-full border border-rose-300">
               <Sparkles className="w-4 h-4 text-rose-500 animate-spin" />
-              <span>Pipecat 끊김 없는 멀티턴 음성 엔진</span>
+              <span>STT → OpenRouter LLM → TTS 파이프라인 작동 중</span>
             </span>
 
             <button
@@ -256,7 +214,7 @@ export default function PipecatVoiceModal({ onClose }) {
             실시간 멀티턴 음성 말벗이 🎙️
           </h3>
           <p className="text-sm text-slate-600 font-medium">
-            한 번 말씀하시면 답변 후 자동으로 다시 귀 기울입니다. 대화가 끊기지 않고 계속 이어집니다! (현재 {turnCount}번째 대화)
+            마이크로 묻고 ➔ OpenRouter AI가 답변 생각하고 ➔ 따뜻한 음성으로 읽어줍니다! (현재 {turnCount}번째 대화)
           </p>
         </div>
 
@@ -264,13 +222,13 @@ export default function PipecatVoiceModal({ onClose }) {
         <div className="space-y-1.5">
           <span className="text-xs font-bold text-slate-600 flex items-center gap-1">
             <MessageSquare className="w-3.5 h-3.5 text-rose-500" />
-            질문을 클릭하셔도 연속 대화가 시작됩니다:
+            질문을 누르시면 바로 LLM ➔ TTS 답변이 재생됩니다:
           </span>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {voicePresets.map((preset, idx) => (
               <button
                 key={idx}
-                onClick={() => sendVoiceToPipecat(preset)}
+                onClick={() => handleUserSpeechInput(preset)}
                 className="bg-rose-50 hover:bg-rose-100 text-rose-950 text-xs md:text-sm font-bold p-2.5 rounded-xl border border-rose-200 text-left transition transform active:scale-95 flex items-center gap-1.5"
               >
                 <span>💬</span>
@@ -286,12 +244,17 @@ export default function PipecatVoiceModal({ onClose }) {
             {isListening ? (
               <div className="flex items-center gap-2 bg-rose-500 text-white px-4 py-1.5 rounded-full font-black text-xs animate-bounce shadow-md">
                 <Mic className="w-4 h-4 animate-pulse" />
-                <span>🟢 듣고 있습니다 (말씀해 주세요)...</span>
+                <span>🟢 어르신 목소리 듣는 중 (말씀하세요)...</span>
+              </div>
+            ) : isAiProcessing ? (
+              <div className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-1.5 rounded-full font-black text-xs animate-pulse shadow-md">
+                <Sparkles className="w-4 h-4 animate-spin" />
+                <span>🧠 OpenRouter AI가 답변을 생각하고 있어요...</span>
               </div>
             ) : isAiSpeaking ? (
               <div className="flex items-center gap-2 bg-amber-500 text-white px-4 py-1.5 rounded-full font-black text-xs animate-pulse shadow-md">
                 <Volume2 className="w-4 h-4 animate-bounce" />
-                <span>🔊 온기 말벗이 신경망 음성 답변 중...</span>
+                <span>🔊 AI 음성 답변 낭독 중...</span>
               </div>
             ) : (
               <div className="flex items-center gap-2 bg-slate-700 text-white px-4 py-1.5 rounded-full font-black text-xs shadow-md">
@@ -312,7 +275,7 @@ export default function PipecatVoiceModal({ onClose }) {
           {/* User Transcript Box */}
           {transcript && (
             <div className="bg-white p-3 rounded-2xl border border-rose-200 text-sm font-bold text-rose-900 animate-pulse">
-              🗣️ 어르신 말씀: "{transcript}"
+              🗣️ 어르신 질문: "{transcript}"
             </div>
           )}
 
@@ -344,7 +307,7 @@ export default function PipecatVoiceModal({ onClose }) {
             <span className="text-xs font-black">{isListening ? '듣는 중' : '음성 시작'}</span>
           </button>
           <span className="text-xs text-slate-500 font-bold">
-            {connectionStatus === 'connected' ? '🟢 Pipecat 끊김 없는 멀티턴 세션 작동 중' : '🟡 음성 서버 연결 중...'}
+            🟢 STT ➔ OpenRouter AI (GPT-4o-mini / Llama 3.3) ➔ TTS 멀티턴 연결됨
           </span>
         </div>
       </div>
