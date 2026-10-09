@@ -15,6 +15,7 @@ export default function PipecatVoiceModal({ onClose }) {
   const wsRef = useRef(null);
   const recognitionRef = useRef(null);
   const isAiSpeakingRef = useRef(false);
+  const currentAiResponseRef = useRef('');
 
   const voicePresets = [
     "오늘 날씨가 어떤가요?",
@@ -37,7 +38,7 @@ export default function PipecatVoiceModal({ onClose }) {
         console.warn("Recognition start error/already running:", err);
       }
     } else {
-      // Fallback simulation
+      // Fallback simulation if mic is blocked
       setTimeout(() => {
         const simulatedText = "오늘 날씨 참 좋네요. 경로당 프로그램도 알려주세요.";
         setTranscript(simulatedText);
@@ -62,7 +63,6 @@ export default function PipecatVoiceModal({ onClose }) {
 
     ws.onopen = () => {
       setConnectionStatus('connected');
-      // Auto start listening on open
       setTimeout(() => {
         startListening();
       }, 800);
@@ -75,8 +75,9 @@ export default function PipecatVoiceModal({ onClose }) {
           console.log('[Pipecat WS Connected]:', data.message);
         } else if (data.type === 'text_delta') {
           setAiResponse(prev => {
-            if (prev === '어르신, 하시고 싶은 말씀을 편하게 말씀해 주셔요. 끊김 없이 이어서 대화 나누실 수 있습니다...') return data.text;
-            return prev + data.text;
+            const nextText = (prev === '어르신, 하시고 싶은 말씀을 편하게 말씀해 주셔요. 끊김 없이 이어서 대화 나누실 수 있습니다...') ? data.text : prev + data.text;
+            currentAiResponseRef.current = nextText;
+            return nextText;
           });
         } else if (data.type === 'neural_audio' && data.audio_base64) {
           // Play ultra-natural Neural Voice
@@ -84,7 +85,7 @@ export default function PipecatVoiceModal({ onClose }) {
           isAiSpeakingRef.current = true;
           stopListening();
 
-          playBase64Audio(data.audio_base64, () => {
+          playBase64Audio(data.audio_base64, data.text || currentAiResponseRef.current, () => {
             setIsAiSpeaking(false);
             isAiSpeakingRef.current = false;
             confetti({ particleCount: 30, spread: 50, origin: { y: 0.6 } });
@@ -94,7 +95,7 @@ export default function PipecatVoiceModal({ onClose }) {
               setTranscript('');
               setTimeout(() => {
                 startListening();
-              }, 600); // 0.6 sec breath pause before listening again
+              }, 600);
             }
           });
         } else if (data.type === 'status') {
@@ -103,6 +104,21 @@ export default function PipecatVoiceModal({ onClose }) {
             isAiSpeakingRef.current = true;
             stopListening();
             setAiResponse('');
+            currentAiResponseRef.current = '';
+          } else if (data.status === 'speaking_end') {
+            // Fallback audio trigger if neural_audio frame did not arrive
+            setTimeout(() => {
+              if (isAiSpeakingRef.current && currentAiResponseRef.current) {
+                speakText(currentAiResponseRef.current, () => {
+                  setIsAiSpeaking(false);
+                  isAiSpeakingRef.current = false;
+                  if (isMultiTurn) {
+                    setTranscript('');
+                    setTimeout(startListening, 600);
+                  }
+                });
+              }
+            }, 300);
           }
         }
       } catch (err) {
@@ -170,10 +186,12 @@ export default function PipecatVoiceModal({ onClose }) {
     } else {
       // Fallback
       setIsAiSpeaking(true);
-      const fallbackMsg = `어르신, "${text}" 말씀 잘 들었습니다! 언제나 따뜻한 하루 보내셔요.`;
+      isAiSpeakingRef.current = true;
+      const fallbackMsg = `어르신, "${text}" 말씀 잘 들었습니다! 언제나 따뜻하고 건강한 하루 보내셔요.`;
       setAiResponse(fallbackMsg);
       speakText(fallbackMsg, () => {
         setIsAiSpeaking(false);
+        isAiSpeakingRef.current = false;
         if (isMultiTurn) {
           setTimeout(startListening, 600);
         }
@@ -186,6 +204,17 @@ export default function PipecatVoiceModal({ onClose }) {
       stopListening();
     } else {
       startListening();
+    }
+  };
+
+  const handleManualReplay = () => {
+    if (aiResponse) {
+      setIsAiSpeaking(true);
+      isAiSpeakingRef.current = true;
+      speakText(aiResponse, () => {
+        setIsAiSpeaking(false);
+        isAiSpeakingRef.current = false;
+      });
     }
   };
 
@@ -261,8 +290,8 @@ export default function PipecatVoiceModal({ onClose }) {
               </div>
             ) : isAiSpeaking ? (
               <div className="flex items-center gap-2 bg-amber-500 text-white px-4 py-1.5 rounded-full font-black text-xs animate-pulse shadow-md">
-                <Volume2 className="w-4 h-4" />
-                <span>🔊 온기 말벗이 답변 중...</span>
+                <Volume2 className="w-4 h-4 animate-bounce" />
+                <span>🔊 온기 말벗이 신경망 음성 답변 중...</span>
               </div>
             ) : (
               <div className="flex items-center gap-2 bg-slate-700 text-white px-4 py-1.5 rounded-full font-black text-xs shadow-md">
@@ -291,11 +320,12 @@ export default function PipecatVoiceModal({ onClose }) {
           <div className="bg-white p-5 rounded-2xl border border-amber-300 text-base md:text-lg font-bold text-slate-900 leading-relaxed text-left min-h-[110px] flex items-start justify-between gap-2 shadow-xs">
             <div className="flex-1">{aiResponse}</div>
             <button
-              onClick={() => speakText(aiResponse)}
-              className="p-2 rounded-xl bg-amber-100 text-amber-900 hover:bg-amber-200 shrink-0"
+              onClick={handleManualReplay}
+              className="p-2.5 rounded-xl bg-amber-100 hover:bg-amber-200 text-amber-900 shrink-0 font-extrabold text-xs flex items-center gap-1 shadow-xs border border-amber-300"
               title="다시 낭독하기"
             >
               <Volume2 className="w-5 h-5 text-amber-800" />
+              <span>다시 읽기</span>
             </button>
           </div>
         </div>

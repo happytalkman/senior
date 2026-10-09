@@ -24,11 +24,17 @@ export const speakText = async (text, onEndCallback) => {
     };
 
     audio.onerror = (e) => {
-      console.warn("Neural TTS API fallback to Web Speech API", e);
+      console.warn("Neural TTS API error, falling back to WebSpeech:", e);
       fallbackWebSpeech(text, onEndCallback);
     };
 
-    await audio.play();
+    const promise = audio.play();
+    if (promise !== undefined) {
+      promise.catch(err => {
+        console.warn("Audio play blocked by browser policy, using WebSpeech fallback:", err);
+        fallbackWebSpeech(text, onEndCallback);
+      });
+    }
   } catch (err) {
     console.warn("Audio playback error, switching to WebSpeech fallback:", err);
     fallbackWebSpeech(text, onEndCallback);
@@ -38,8 +44,11 @@ export const speakText = async (text, onEndCallback) => {
 /**
  * 브라우저 기본 Web Speech API Fallback
  */
-const fallbackWebSpeech = (text, onEndCallback) => {
-  if (!('speechSynthesis' in window)) return;
+export const fallbackWebSpeech = (text, onEndCallback) => {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+    if (onEndCallback) onEndCallback();
+    return;
+  }
 
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
@@ -64,8 +73,10 @@ const fallbackWebSpeech = (text, onEndCallback) => {
  */
 export const stopSpeech = () => {
   if (currentAudio) {
-    currentAudio.pause();
-    currentAudio.currentTime = 0;
+    try {
+      currentAudio.pause();
+      currentAudio.currentTime = 0;
+    } catch (e) {}
     currentAudio = null;
   }
   if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
@@ -76,15 +87,47 @@ export const stopSpeech = () => {
 /**
  * Base64 신경망 오디오 바로 재생
  */
-export const playBase64Audio = (base64Data, onEndCallback) => {
+export const playBase64Audio = (base64Data, textFallback, onEndCallback) => {
   stopSpeech();
   try {
     const audio = new Audio(`data:audio/mpeg;base64,${base64Data}`);
     currentAudio = audio;
-    if (onEndCallback) audio.onended = onEndCallback;
-    audio.play();
+
+    let callbackFired = false;
+    const fireCallback = () => {
+      if (!callbackFired) {
+        callbackFired = true;
+        if (onEndCallback) onEndCallback();
+      }
+    };
+
+    audio.onended = fireCallback;
+    audio.onerror = () => {
+      if (textFallback) {
+        fallbackWebSpeech(textFallback, fireCallback);
+      } else {
+        fireCallback();
+      }
+    };
+
+    const promise = audio.play();
+    if (promise !== undefined) {
+      promise.catch(err => {
+        console.warn("Base64 Audio play blocked by browser autoplay policy, using WebSpeech fallback:", err);
+        if (textFallback) {
+          fallbackWebSpeech(textFallback, fireCallback);
+        } else {
+          fireCallback();
+        }
+      });
+    }
   } catch (err) {
     console.error("Base64 Audio play error:", err);
+    if (textFallback) {
+      fallbackWebSpeech(textFallback, onEndCallback);
+    } else if (onEndCallback) {
+      onEndCallback();
+    }
   }
 };
 
@@ -92,6 +135,7 @@ export const playBase64Audio = (base64Data, onEndCallback) => {
  * 마이크 음성 인식 (STT - Speech to Text)
  */
 export const startVoiceRecognition = (onResultCallback, onErrorCallback, onEndCallback) => {
+  if (typeof window === 'undefined') return null;
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
   if (!SpeechRecognition) {
