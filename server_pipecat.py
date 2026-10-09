@@ -1,6 +1,6 @@
 """
-대한노인회 온기동행 - Pipecat & OpenRouter 무료 LLM + 신경망 음성 합성 서버
-(Pipecat AI + OpenRouter Free LLM Engine + Microsoft Neural Voice)
+대한노인회 온기동행 - Pipecat & OpenRouter 고성능 LLM 음성 서버
+(Pipecat Framework + OpenRouter LLM Models + Microsoft Neural Voice)
 """
 
 import os
@@ -8,6 +8,7 @@ import asyncio
 import json
 import base64
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +26,8 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.aggregators.llm_context import LLMContext
+
+load_dotenv(override=True)
 
 app = FastAPI(title="Pipecat Senior Neural Voice Agent Server with OpenRouter LLM")
 
@@ -48,12 +51,12 @@ SENIOR_SYSTEM_PROMPT = """
 DEFAULT_VOICE = "ko-KR-SunHiNeural"
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
-# OpenRouter Free Models list
-OPENROUTER_FREE_MODELS = [
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "google/gemini-2.0-flash-lite-preview-02-05:free",
-    "deepseek/deepseek-r1:free",
-    "qwen/qwen-2.5-coder-32b-instruct:free"
+# OpenRouter Available Models
+OPENROUTER_MODELS = [
+    "openai/gpt-4o-mini",
+    "meta-llama/llama-3.3-70b-instruct",
+    "qwen/qwen-2.5-72b-instruct",
+    "deepseek/deepseek-chat"
 ]
 
 async def generate_neural_audio_bytes(text: str, voice: str = DEFAULT_VOICE) -> bytes:
@@ -67,7 +70,7 @@ async def generate_neural_audio_bytes(text: str, voice: str = DEFAULT_VOICE) -> 
 
 
 async def query_openrouter_llm(messages: list, api_key: str = "") -> str:
-    """OpenRouter API를 통해 무료 LLM 모델(Llama 3.3 / Gemini / DeepSeek)로 대화 생성"""
+    """OpenRouter API를 통해 최신 고성능 LLM 모델로 대화 생성"""
     key_to_use = api_key or OPENROUTER_API_KEY
     if not key_to_use:
         return ""
@@ -79,7 +82,7 @@ async def query_openrouter_llm(messages: list, api_key: str = "") -> str:
         "Content-Type": "application/json"
     }
 
-    for model in OPENROUTER_FREE_MODELS:
+    for model in OPENROUTER_MODELS:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 payload = {
@@ -95,6 +98,8 @@ async def query_openrouter_llm(messages: list, api_key: str = "") -> str:
                     if content:
                         logger.info(f"[OpenRouter LLM Success - Model: {model}]: {content}")
                         return content
+                else:
+                    logger.warning(f"OpenRouter model {model} returned status {resp.status_code}")
         except Exception as e:
             logger.warning(f"OpenRouter query error with {model}: {e}")
 
@@ -144,10 +149,10 @@ class SeniorAiVoiceProcessor(FrameProcessor):
 
             self.context.add_message({"role": "user", "content": user_text})
 
-            # 1. OpenRouter 무료 LLM 시도
+            # 1. OpenRouter LLM API 연동 생성
             response_text = await query_openrouter_llm(self.context.get_messages(), self.openrouter_key)
 
-            # 2. OpenRouter 키가 없거나 실패 시 시니어 스마트 한국어 엔진 Fallback
+            # 2. 만약 백업이 필요하면 시니어 스마트 한국어 엔진 Fallback
             if not response_text:
                 response_text = self.generate_senior_local_llm_response(user_text)
 
@@ -155,12 +160,12 @@ class SeniorAiVoiceProcessor(FrameProcessor):
 
             await self.push_frame(LLMFullResponseStartFrame(), direction)
 
-            # 텍스트 단어 스트리밍
+            # 텍스트 스트리밍
             words = response_text.split(" ")
             for i, word in enumerate(words):
                 chunk = word + (" " if i < len(words) - 1 else "")
                 await self.push_frame(TextFrame(text=chunk), direction)
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.04)
 
             # 초자연 신경망 음성 오디오 생성 및 전송
             try:
@@ -199,10 +204,12 @@ class SeniorAiVoiceProcessor(FrameProcessor):
 
 @app.get("/api/health")
 async def health_check():
+    key_exists = bool(os.environ.get("OPENROUTER_API_KEY", ""))
     return {
         "status": "online",
-        "engine": "Pipecat 1.12.1 + OpenRouter Free LLM + Microsoft Neural Voice",
-        "models": OPENROUTER_FREE_MODELS,
+        "engine": "Pipecat 1.12.1 + OpenRouter LLM + Microsoft Neural Voice",
+        "openrouter_key_active": key_exists,
+        "models": OPENROUTER_MODELS,
         "service": "대한노인회 끊김 없는 멀티턴 음성 파이프라인"
     }
 
@@ -225,10 +232,9 @@ async def websocket_pipecat_endpoint(websocket: WebSocket):
     context = LLMContext()
     context.add_message({"role": "system", "content": SENIOR_SYSTEM_PROMPT})
 
-    # 비동기 핸들러 생성
-    openrouter_key = ""
+    key_env = os.environ.get("OPENROUTER_API_KEY", "")
     ws_output = PipecatWebSocketOutputProcessor(websocket)
-    ai_processor = SeniorAiVoiceProcessor(context, websocket, openrouter_key)
+    ai_processor = SeniorAiVoiceProcessor(context, websocket, key_env)
 
     pipeline = Pipeline([
         ai_processor,
@@ -242,7 +248,7 @@ async def websocket_pipecat_endpoint(websocket: WebSocket):
 
     await websocket.send_json({
         "type": "connected",
-        "message": "Pipecat & OpenRouter 무료 LLM 연결 완료! 대화가 끊기지 않고 이어서 진행됩니다."
+        "message": "Pipecat & OpenRouter LLM 인증 완료! 대화가 끊기지 않고 연속으로 진행됩니다."
     })
 
     try:
@@ -252,7 +258,7 @@ async def websocket_pipecat_endpoint(websocket: WebSocket):
 
             if msg.get("type") == "user_speak":
                 text = msg.get("text", "")
-                if "openrouter_key" in msg:
+                if "openrouter_key" in msg and msg["openrouter_key"]:
                     ai_processor.openrouter_key = msg.get("openrouter_key")
                 logger.info(f"Received WebSocket audio transcript: {text}")
                 await pipeline.queue_frame(TextFrame(text=text))
