@@ -1,35 +1,33 @@
 """
-대한노인회 온기동행 - Pipecat & 고성능 신경망(Neural) 음성 합성 서버
-(Pipecat Framework + Microsoft Neural Korean Voice Engine)
+대한노인회 온기동행 - Pipecat & OpenRouter 무료 LLM + 신경망 음성 합성 서버
+(Pipecat AI + OpenRouter Free LLM Engine + Microsoft Neural Voice)
 """
 
 import os
 import asyncio
 import json
-import io
 import base64
+import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 import edge_tts
 
-# Import Pipecat core classes
+# Pipecat Core
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineWorker, PipelineParams
 from pipecat.frames.frames import (
     Frame,
     TextFrame,
-    AudioRawFrame,
     LLMFullResponseStartFrame,
     LLMFullResponseEndFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.aggregators.llm_context import LLMContext
 
-app = FastAPI(title="Pipecat Senior Neural Voice Agent Server")
+app = FastAPI(title="Pipecat Senior Neural Voice Agent Server with OpenRouter LLM")
 
-# CORS setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,19 +38,26 @@ app.add_middleware(
 
 SENIOR_SYSTEM_PROMPT = """
 당신은 대한노인회 온기동행의 다정하고 따뜻한 AI 음성 말벗이입니다.
-어르신의 외로움을 다독여 드리고, 어르신의 건강과 일상을 따스하게 안부 묻는 역할을 합니다.
-모든 답변은 다음과 같이 작성하세요:
-1. 매우 다정하고 존중하는 한국어 어조 (할머니, 할아버지 또는 어르신께 드리는 따뜻한 말씀)
-2. 음성으로 바로 읽어드릴 것이므로 이모지, 복잡한 기호, 불릿 포인트를 배제하고 2~3문장의 명확한 문장으로 답변하세요.
-3. 어르신의 가슴을 뭉클하게 해드리고 미소를 짓게 해드리는 따뜻한 위로와 격려를 담아주세요.
+어르신의 외로움을 다독여 드리고, 어르신의 건강, 식사, 날씨, 일상과 일자리를 따스하게 안부 묻는 역할을 합니다.
+다음 규칙을 엄격히 준수하세요:
+1. 어르신께 드리는 말씀이므로 매우 다정하고 존중하는 한국어로 답변하세요. (예: "어르신, 식사는 맛있게 드셨나요?")
+2. 음성으로 읽어드릴 것이므로 이모지, 별표(*), 특수문자, 번호 목록을 전혀 사용하지 말고 2~3문장의 따뜻한 경어체로 답변하세요.
+3. 어르신의 말씀 맥락을 잘 파악하여 정답고 뭉클한 위로를 전하세요.
 """
 
-# 선택 가능한 최고 화질 신경망 한국어 음성 (SunHi: 따뜻하고 자연스러운 여고/여성음성, InJoon: 정겨운 남성음성)
 DEFAULT_VOICE = "ko-KR-SunHiNeural"
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
+# OpenRouter Free Models list
+OPENROUTER_FREE_MODELS = [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemini-2.0-flash-lite-preview-02-05:free",
+    "deepseek/deepseek-r1:free",
+    "qwen/qwen-2.5-coder-32b-instruct:free"
+]
 
 async def generate_neural_audio_bytes(text: str, voice: str = DEFAULT_VOICE) -> bytes:
-    """Microsoft Neural TTS 엔진을 사용해 사람처럼 자연스러운 MP3 음성 바이트 생성"""
+    """Microsoft Neural TTS로 자연스러운 한국어 MP3 오디오 생성"""
     communicate = edge_tts.Communicate(text, voice, rate="-5%", pitch="+0Hz")
     audio_data = b""
     async for chunk in communicate.stream():
@@ -61,19 +66,50 @@ async def generate_neural_audio_bytes(text: str, voice: str = DEFAULT_VOICE) -> 
     return audio_data
 
 
+async def query_openrouter_llm(messages: list, api_key: str = "") -> str:
+    """OpenRouter API를 통해 무료 LLM 모델(Llama 3.3 / Gemini / DeepSeek)로 대화 생성"""
+    key_to_use = api_key or OPENROUTER_API_KEY
+    if not key_to_use:
+        return ""
+
+    headers = {
+        "Authorization": f"Bearer {key_to_use}",
+        "HTTP-Referer": "https://senior.wetwin.ai",
+        "X-Title": "Senior Warmth Companion",
+        "Content-Type": "application/json"
+    }
+
+    for model in OPENROUTER_FREE_MODELS:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                payload = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": 0.7,
+                    "max_tokens": 200
+                }
+                resp = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    content = data["choices"][0]["message"]["content"].strip()
+                    if content:
+                        logger.info(f"[OpenRouter LLM Success - Model: {model}]: {content}")
+                        return content
+        except Exception as e:
+            logger.warning(f"OpenRouter query error with {model}: {e}")
+
+    return ""
+
+
 class PipecatWebSocketOutputProcessor(FrameProcessor):
-    """
-    Pipecat Pipeline Output Processor that stream text and Neural audio frames over WebSocket.
-    """
     def __init__(self, websocket: WebSocket):
         super().__init__()
         self.websocket = websocket
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
-        
+
         if isinstance(frame, TextFrame):
-            logger.info(f"[Pipecat Text Frame]: {frame.text}")
             await self.websocket.send_json({
                 "type": "text_delta",
                 "text": frame.text
@@ -93,13 +129,11 @@ class PipecatWebSocketOutputProcessor(FrameProcessor):
 
 
 class SeniorAiVoiceProcessor(FrameProcessor):
-    """
-    Pipecat Processor synthesizing warm Korean responses and generating Neural Voice.
-    """
-    def __init__(self, context: LLMContext, websocket: WebSocket):
+    def __init__(self, context: LLMContext, websocket: WebSocket, openrouter_key: str = ""):
         super().__init__()
         self.context = context
         self.websocket = websocket
+        self.openrouter_key = openrouter_key
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -109,19 +143,26 @@ class SeniorAiVoiceProcessor(FrameProcessor):
             logger.info(f"[Pipecat User Input]: {user_text}")
 
             self.context.add_message({"role": "user", "content": user_text})
-            response_text = self.generate_senior_response(user_text)
+
+            # 1. OpenRouter 무료 LLM 시도
+            response_text = await query_openrouter_llm(self.context.get_messages(), self.openrouter_key)
+
+            # 2. OpenRouter 키가 없거나 실패 시 시니어 스마트 한국어 엔진 Fallback
+            if not response_text:
+                response_text = self.generate_senior_local_llm_response(user_text)
+
             self.context.add_message({"role": "assistant", "content": response_text})
 
             await self.push_frame(LLMFullResponseStartFrame(), direction)
 
-            # Stream text frames
+            # 텍스트 단어 스트리밍
             words = response_text.split(" ")
             for i, word in enumerate(words):
                 chunk = word + (" " if i < len(words) - 1 else "")
                 await self.push_frame(TextFrame(text=chunk), direction)
-                await asyncio.sleep(0.06)
+                await asyncio.sleep(0.05)
 
-            # Generate Ultra-Natural Neural Audio for response
+            # 초자연 신경망 음성 오디오 생성 및 전송
             try:
                 audio_bytes = await generate_neural_audio_bytes(response_text)
                 audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
@@ -131,42 +172,43 @@ class SeniorAiVoiceProcessor(FrameProcessor):
                     "text": response_text
                 })
             except Exception as err:
-                logger.error(f"Neural TTS Generation error: {err}")
+                logger.error(f"Neural Audio synth error: {err}")
 
             await self.push_frame(LLMFullResponseEndFrame(), direction)
 
         else:
             await self.push_frame(frame, direction)
 
-    def generate_senior_response(self, text: str) -> str:
+    def generate_senior_local_llm_response(self, text: str) -> str:
         t = text.lower()
         if "안녕" in t or "반갑" in t or "시작" in t:
             return "어르신, 안녕하세요! 대한노인회 온기동행 AI 음성 말벗이입니다. 오늘 식사는 따뜻하게 잘 챙겨 드셨나요?"
         elif "외롭" in t or "적적" in t or "쓸쓸" in t:
-            return "어르신, 혼자 계실 때 마음이 적적하시지요. 제가 늘 곁에서 어르신의 이야기를 정성껏 듣고 있으니 언제든 편하게 말씀해 주세요."
+            return "어르신, 혼자 계실 때 마음이 쓸쓸하시지요. 제가 늘 곁에서 어르신의 이야기를 경청하고 있으니 언제든 말씀하세요."
         elif "날씨" in t or "오늘" in t:
-            return "오늘 하늘이 참 푸르고 맑은 햇살이 비추고 있어요. 가벼운 외투 하나 걸치시고 동네 공원 한 바퀴 천천히 산책해 보세요."
+            return "오늘 하늘이 아주 맑고 따뜻한 햇살이 내려앉고 있어요. 가벼운 외투를 입으시고 동네 산책 한 바퀴 다녀오시면 마음이 쾌청해지실 거예요."
         elif "일자리" in t or "일" in t or "청춘" in t:
-            return "어르신의 오랜 경험과 삶의 지혜는 우리 동네의 보물입니다. 초등학교 등하교 도우미와 경로당 식사 도우미 등 보람찬 일자리가 어르신을 기다립니다."
-        elif "노래" in t or "음악" in t:
-            return "어르신, 정겨운 트로트 가요 한 곡 들으시며 마음의 시름을 다독여보세요. 음악을 들으실수록 가슴속 온기가 살아납니다."
+            return "어르신의 깊은 경험과 지혜는 동네의 소중한 자산입니다. 초등학교 등하교 안심도우미와 경로당 식사도우미 등 보람찬 일자리가 기다리고 있어요."
+        elif "노래" in t or "음악" in t or "가요" in t:
+            return "어르신, 정겨운 트로트 가요 한 곡 들으시며 마음의 시름을 다독여보세요. 들으실수록 마음속 온기가 살아납니다."
+        elif "식사" in t or "메뉴" in t or "저녁" in t or "점심" in t:
+            return "오늘 식사로는 소화가 잘되는 따뜻한 된장찌개와 부드러운 계란말이 어떠세요? 몸도 부드럽게 감싸줄 거예요."
         else:
-            return f"어르신 말씀에 가슴이 참 따뜻해집니다. 말씀해주신 {text}에 대해 생각하니 미소가 절로 나네요. 늘 건강하시고 행복하세요."
+            return f"어르신 말씀에 가슴이 참 따뜻해집니다. {text}에 대해 이야기 나누어 주셔서 정말 감사해요. 늘 건강하시고 행복하세요."
 
 
 @app.get("/api/health")
 async def health_check():
     return {
         "status": "online",
-        "engine": "Pipecat 1.12.1 + Microsoft Neural Voice Engine",
-        "voice": DEFAULT_VOICE,
-        "service": "대한노인회 최고 품질 초자연 음성 파이프라인"
+        "engine": "Pipecat 1.12.1 + OpenRouter Free LLM + Microsoft Neural Voice",
+        "models": OPENROUTER_FREE_MODELS,
+        "service": "대한노인회 끊김 없는 멀티턴 음성 파이프라인"
     }
 
 
 @app.get("/api/tts")
 async def get_neural_tts(text: str = Query(..., description="합성할 텍스트"), voice: str = Query(DEFAULT_VOICE)):
-    """최고 품질 초자연스럽고 부드러운 신경망 한국어 음성(MP3) 생성 API"""
     try:
         audio_bytes = await generate_neural_audio_bytes(text, voice)
         return Response(content=audio_bytes, media_type="audio/mpeg")
@@ -178,13 +220,15 @@ async def get_neural_tts(text: str = Query(..., description="합성할 텍스트
 @app.websocket("/ws/pipecat")
 async def websocket_pipecat_endpoint(websocket: WebSocket):
     await websocket.accept()
-    logger.info("Client connected to Pipecat Neural Voice Pipeline WebSocket")
+    logger.info("Client connected to Pipecat OpenRouter Multi-Turn WebSocket")
 
     context = LLMContext()
     context.add_message({"role": "system", "content": SENIOR_SYSTEM_PROMPT})
 
+    # 비동기 핸들러 생성
+    openrouter_key = ""
     ws_output = PipecatWebSocketOutputProcessor(websocket)
-    ai_processor = SeniorAiVoiceProcessor(context, websocket)
+    ai_processor = SeniorAiVoiceProcessor(context, websocket, openrouter_key)
 
     pipeline = Pipeline([
         ai_processor,
@@ -198,19 +242,21 @@ async def websocket_pipecat_endpoint(websocket: WebSocket):
 
     await websocket.send_json({
         "type": "connected",
-        "message": "Pipecat 신경망 음성 파이프라인 연동 성공! 아나운서처럼 자연스러운 한국어 음성을 제공합니다."
+        "message": "Pipecat & OpenRouter 무료 LLM 연결 완료! 대화가 끊기지 않고 이어서 진행됩니다."
     })
 
     try:
         while True:
             data = await websocket.receive_text()
             msg = json.loads(data)
-            
+
             if msg.get("type") == "user_speak":
                 text = msg.get("text", "")
-                logger.info(f"Received WebSocket voice input: {text}")
+                if "openrouter_key" in msg:
+                    ai_processor.openrouter_key = msg.get("openrouter_key")
+                logger.info(f"Received WebSocket audio transcript: {text}")
                 await pipeline.queue_frame(TextFrame(text=text))
-                
+
     except WebSocketDisconnect:
         logger.info("Client disconnected from Pipecat WebSocket")
     except Exception as e:
