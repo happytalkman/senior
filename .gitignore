@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Production build
+dist/
+dist-ssr/
+*.local
+
+# Logs and environment
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.env
+.env.*
+
+# Editor and system directories
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Cloned Pipecat source directory
+pipecat-src/
+
+# Test audio outputs
+*.mp3
