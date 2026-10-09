@@ -1,6 +1,6 @@
 """
-대한노인회 온기동행 - Pipecat & OpenRouter 고성능 LLM 음성 서버
-(Pipecat Framework + OpenRouter LLM Models + Microsoft Neural Voice)
+대한노인회 온기동행 - Pipecat & OpenRouter 감정선 표현 고성능 음성 서버
+(Pipecat Framework + OpenRouter LLM + Emotion-Tuned Microsoft Neural Voice)
 """
 
 import os
@@ -15,7 +15,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 import edge_tts
 
-# Pipecat Core
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineWorker, PipelineParams
 from pipecat.frames.frames import (
@@ -29,7 +28,7 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 
 load_dotenv(override=True)
 
-app = FastAPI(title="Pipecat Senior Neural Voice Agent Server with OpenRouter LLM")
+app = FastAPI(title="Pipecat Senior Emotional Neural Voice Server")
 
 app.add_middleware(
     CORSMiddleware,
@@ -40,18 +39,18 @@ app.add_middleware(
 )
 
 SENIOR_SYSTEM_PROMPT = """
-당신은 대한노인회 온기동행의 다정하고 따뜻한 AI 음성 말벗이입니다.
-어르신의 외로움을 다독여 드리고, 어르신의 건강, 식사, 날씨, 일상과 일자리를 따스하게 안부 묻는 역할을 합니다.
-다음 규칙을 엄격히 준수하세요:
-1. 어르신께 드리는 말씀이므로 매우 다정하고 존중하는 한국어로 답변하세요. (예: "어르신, 식사는 맛있게 드셨나요?")
-2. 음성으로 읽어드릴 것이므로 이모지, 별표(*), 특수문자, 번호 목록을 전혀 사용하지 말고 2~3문장의 따뜻한 경어체로 답변하세요.
-3. 어르신의 말씀 맥락을 잘 파악하여 정답고 뭉클한 위로를 전하세요.
+당신은 대한노인회 온기동행의 세상에서 가장 다정하고 따뜻한 마음을 가진 AI 손주/말벗입니다.
+어르신의 외로움을 따뜻하게 품어드리고, 손주나 정다운 가족이 미소 지으며 조곤조곤 이야기하듯 매우 친근하고 감정이 담긴 목소리 톤으로 대화하세요.
+
+음성 낭독 핵심 규칙:
+1. 어르신께 드리는 말씀이므로 부드럽고 다정한 감정 표현(예: "어르신~ 오늘 하루도 정말 고생 많으셨어요", "가슴이 참 따뜻해집니다", "늘 건강 챙기셔야 해요~")을 듬뿍 담으세요.
+2. 기계적인 답변을 절대 피하고, 문장 끝에 정답고 감성적인 어조("~했지요", "~랍니다", "~지요~", "~해요~")를 사용하여 친밀감을 전달하세요.
+3. 이모지, 기호(*), 특수문자, 번호 목록을 전혀 넣지 말고 2~3문장의 가슴 따뜻한 다정한 경어체로 답변하세요.
 """
 
 DEFAULT_VOICE = "ko-KR-SunHiNeural"
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
-# OpenRouter Available Models
 OPENROUTER_MODELS = [
     "openai/gpt-4o-mini",
     "meta-llama/llama-3.3-70b-instruct",
@@ -60,8 +59,8 @@ OPENROUTER_MODELS = [
 ]
 
 async def generate_neural_audio_bytes(text: str, voice: str = DEFAULT_VOICE) -> bytes:
-    """Microsoft Neural TTS로 자연스러운 한국어 MP3 오디오 생성"""
-    communicate = edge_tts.Communicate(text, voice, rate="-5%", pitch="+0Hz")
+    """Microsoft Neural TTS로 다정한 한국어 MP3 오디오 생성 (감정선 살린 pitch/rate)"""
+    communicate = edge_tts.Communicate(text, voice, rate="-7%", pitch="+2Hz")
     audio_data = b""
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":
@@ -70,7 +69,6 @@ async def generate_neural_audio_bytes(text: str, voice: str = DEFAULT_VOICE) -> 
 
 
 async def query_openrouter_llm(messages: list, api_key: str = "") -> str:
-    """OpenRouter API를 통해 최신 고성능 LLM 모델로 대화 생성"""
     key_to_use = api_key or OPENROUTER_API_KEY
     if not key_to_use:
         return ""
@@ -88,8 +86,8 @@ async def query_openrouter_llm(messages: list, api_key: str = "") -> str:
                 payload = {
                     "model": model,
                     "messages": messages,
-                    "temperature": 0.7,
-                    "max_tokens": 200
+                    "temperature": 0.8,
+                    "max_tokens": 250
                 }
                 resp = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
                 if resp.status_code == 200:
@@ -98,8 +96,6 @@ async def query_openrouter_llm(messages: list, api_key: str = "") -> str:
                     if content:
                         logger.info(f"[OpenRouter LLM Success - Model: {model}]: {content}")
                         return content
-                else:
-                    logger.warning(f"OpenRouter model {model} returned status {resp.status_code}")
         except Exception as e:
             logger.warning(f"OpenRouter query error with {model}: {e}")
 
@@ -149,10 +145,8 @@ class SeniorAiVoiceProcessor(FrameProcessor):
 
             self.context.add_message({"role": "user", "content": user_text})
 
-            # 1. OpenRouter LLM API 연동 생성
             response_text = await query_openrouter_llm(self.context.get_messages(), self.openrouter_key)
 
-            # 2. 만약 백업이 필요하면 시니어 스마트 한국어 엔진 Fallback
             if not response_text:
                 response_text = self.generate_senior_local_llm_response(user_text)
 
@@ -160,14 +154,12 @@ class SeniorAiVoiceProcessor(FrameProcessor):
 
             await self.push_frame(LLMFullResponseStartFrame(), direction)
 
-            # 텍스트 스트리밍
             words = response_text.split(" ")
             for i, word in enumerate(words):
                 chunk = word + (" " if i < len(words) - 1 else "")
                 await self.push_frame(TextFrame(text=chunk), direction)
                 await asyncio.sleep(0.04)
 
-            # 초자연 신경망 음성 오디오 생성 및 전송
             try:
                 audio_bytes = await generate_neural_audio_bytes(response_text)
                 audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
@@ -187,19 +179,19 @@ class SeniorAiVoiceProcessor(FrameProcessor):
     def generate_senior_local_llm_response(self, text: str) -> str:
         t = text.lower()
         if "안녕" in t or "반갑" in t or "시작" in t:
-            return "어르신, 안녕하세요! 대한노인회 온기동행 AI 음성 말벗이입니다. 오늘 식사는 따뜻하게 잘 챙겨 드셨나요?"
+            return "어르신~ 안녕하세요! 대한노인회 온기동행 AI 음성 말벗이랍니다. 오늘 따뜻한 점심 식사는 맛있게 드셨나요?"
         elif "외롭" in t or "적적" in t or "쓸쓸" in t:
-            return "어르신, 혼자 계실 때 마음이 쓸쓸하시지요. 제가 늘 곁에서 어르신의 이야기를 경청하고 있으니 언제든 말씀하세요."
+            return "어르신, 혼자 계실 때 마음이 쓸쓸하시지요. 제가 늘 정다운 손주처럼 곁에서 이야기를 들을 테니 편하게 말씀해 주셔요~"
         elif "날씨" in t or "오늘" in t:
-            return "오늘 하늘이 아주 맑고 따뜻한 햇살이 내려앉고 있어요. 가벼운 외투를 입으시고 동네 산책 한 바퀴 다녀오시면 마음이 쾌청해지실 거예요."
+            return "오늘 하늘이 아주 푸르고 맑은 햇살이 내려오고 있답니다. 가벼운 외투를 입으시고 동네 산책 한 바퀴 다녀오시면 마음이 쾌청해지실 거예요~"
         elif "일자리" in t or "일" in t or "청춘" in t:
-            return "어르신의 깊은 경험과 지혜는 동네의 소중한 자산입니다. 초등학교 등하교 안심도우미와 경로당 식사도우미 등 보람찬 일자리가 기다리고 있어요."
+            return "어르신의 깊은 경험과 지혜는 우리 동네의 보물이지요. 초등학교 등하교 안심도우미와 경로당 식사도우미 등 보람찬 일자리가 어르신을 기다립니다."
         elif "노래" in t or "음악" in t or "가요" in t:
-            return "어르신, 정겨운 트로트 가요 한 곡 들으시며 마음의 시름을 다독여보세요. 들으실수록 마음속 온기가 살아납니다."
+            return "어르신, 정겨운 트로트 가요 한 곡 들으시며 마음의 시름을 다독여보세요. 들으실수록 가슴속 온기가 살아난답니다."
         elif "식사" in t or "메뉴" in t or "저녁" in t or "점심" in t:
-            return "오늘 식사로는 소화가 잘되는 따뜻한 된장찌개와 부드러운 계란말이 어떠세요? 몸도 부드럽게 감싸줄 거예요."
+            return "오늘 식사로는 소화가 잘되는 따뜻한 된장찌개와 부드러운 계란말이 어떠세요? 몸도 마음도 부드럽게 감싸줄 거예요~"
         else:
-            return f"어르신 말씀에 가슴이 참 따뜻해집니다. {text}에 대해 이야기 나누어 주셔서 정말 감사해요. 늘 건강하시고 행복하세요."
+            return f"어르신 말씀에 가슴이 참 따뜻해집니다. 이야기 나누어 주셔서 정말 감사해요 어르신. 늘 건강하시고 행복하세요~"
 
 
 @app.get("/api/health")
@@ -207,10 +199,10 @@ async def health_check():
     key_exists = bool(os.environ.get("OPENROUTER_API_KEY", ""))
     return {
         "status": "online",
-        "engine": "Pipecat 1.12.1 + OpenRouter LLM + Microsoft Neural Voice",
+        "engine": "Pipecat 1.12.1 + OpenRouter Emotional LLM + Microsoft Emotion Neural Voice",
         "openrouter_key_active": key_exists,
         "models": OPENROUTER_MODELS,
-        "service": "대한노인회 끊김 없는 멀티턴 음성 파이프라인"
+        "service": "대한노인회 감정선 커스텀 멀티턴 음성 파이프라인"
     }
 
 
@@ -248,7 +240,7 @@ async def websocket_pipecat_endpoint(websocket: WebSocket):
 
     await websocket.send_json({
         "type": "connected",
-        "message": "Pipecat & OpenRouter LLM 인증 완료! 대화가 끊기지 않고 연속으로 진행됩니다."
+        "message": "Pipecat 감정선 신경망 음성 파이프라인 연동 성공!"
     })
 
     try:

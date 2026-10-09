@@ -1,48 +1,74 @@
-// 대한노인회 온기동행 - 초자연 신경망(Neural Voice) 음성 합성(TTS/STT) 서비스 유틸리티
+// 대한노인회 온기동행 - 감정선이 살아있는 초자연 신경망(Neural Voice) 음성 유틸리티
 
 let currentAudio = null;
+let cachedVoices = [];
+
+// 최고의 감정과 친화감을 주는 한국어 자연어 음성 찾기
+const getBestKoreanVoice = () => {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return null;
+
+  if (cachedVoices.length === 0) {
+    cachedVoices = window.speechSynthesis.getVoices();
+  }
+
+  // 1순위: Microsoft Natural (자연어 신경망 음성)
+  let best = cachedVoices.find(v => v.lang.includes('ko') && (v.name.includes('Natural') || v.name.includes('SunHi') || v.name.includes('InJoon')));
+  // 2순위: Google 한국어 음성
+  if (!best) best = cachedVoices.find(v => v.lang.includes('ko') && v.name.includes('Google'));
+  // 3순위: 기타 모든 한국어 음성
+  if (!best) best = cachedVoices.find(v => v.lang.includes('ko') || v.lang.includes('KO'));
+
+  return best;
+};
+
+if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+  window.speechSynthesis.onvoiceschanged = () => {
+    cachedVoices = window.speechSynthesis.getVoices();
+  };
+}
 
 /**
- * 초자연스러운 신경망(Neural) 한국어 음성 낭독
- * 1순위: Pipecat / Microsoft Neural Voice API (ko-KR-SunHiNeural)
- * 2순위: 브라우저 Web Speech API Fallback
+ * 감정을 담은 따뜻한 한국어 음성 낭독 (TTS)
  */
 export const speakText = async (text, onEndCallback) => {
   if (!text) return;
 
-  // 기존 재생 중인 음성 즉시 중지
   stopSpeech();
 
   try {
-    // 1. 신경망 Neural TTS API 호출 (사람처럼 호흡과 감정이 살아있는 음성)
+    // 1순위: Microsoft Neural Voice API 연동 (사람의 감정과 호흡이 담긴 최고 음질)
     const ttsUrl = `http://localhost:8000/api/tts?text=${encodeURIComponent(text)}&voice=ko-KR-SunHiNeural`;
     const audio = new Audio(ttsUrl);
     currentAudio = audio;
 
-    audio.onended = () => {
-      if (onEndCallback) onEndCallback();
+    let ended = false;
+    const finish = () => {
+      if (!ended) {
+        ended = true;
+        if (onEndCallback) onEndCallback();
+      }
     };
 
-    audio.onerror = (e) => {
-      console.warn("Neural TTS API error, falling back to WebSpeech:", e);
-      fallbackWebSpeech(text, onEndCallback);
+    audio.onended = finish;
+    audio.onerror = () => {
+      fallbackWebSpeech(text, finish);
     };
 
     const promise = audio.play();
     if (promise !== undefined) {
       promise.catch(err => {
-        console.warn("Audio play blocked by browser policy, using WebSpeech fallback:", err);
-        fallbackWebSpeech(text, onEndCallback);
+        console.warn("Neural Audio play policy block, falling back to tuned WebSpeech:", err);
+        fallbackWebSpeech(text, finish);
       });
     }
   } catch (err) {
-    console.warn("Audio playback error, switching to WebSpeech fallback:", err);
+    console.warn("Neural Audio error, using WebSpeech fallback:", err);
     fallbackWebSpeech(text, onEndCallback);
   }
 };
 
 /**
- * 브라우저 기본 Web Speech API Fallback
+ * 감정과 친밀감이 적용된 브라우저 WebSpeech Fallback
  */
 export const fallbackWebSpeech = (text, onEndCallback) => {
   if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
@@ -51,14 +77,16 @@ export const fallbackWebSpeech = (text, onEndCallback) => {
   }
 
   window.speechSynthesis.cancel();
+
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = 'ko-KR';
-  utterance.rate = 0.88;
-  utterance.pitch = 1.0;
+  utterance.rate = 0.85; // 따뜻하고 여유로운 속도
+  utterance.pitch = 1.04; // 정답고 친근한 톤
 
-  const voices = window.speechSynthesis.getVoices();
-  const koVoice = voices.find(v => v.lang.includes('ko') || v.lang.includes('KO'));
-  if (koVoice) utterance.voice = koVoice;
+  const voice = getBestKoreanVoice();
+  if (voice) {
+    utterance.voice = voice;
+  }
 
   if (onEndCallback) {
     utterance.onend = onEndCallback;
@@ -85,7 +113,7 @@ export const stopSpeech = () => {
 };
 
 /**
- * Base64 신경망 오디오 바로 재생
+ * Base64 신경망 감정 오디오 바로 재생
  */
 export const playBase64Audio = (base64Data, textFallback, onEndCallback) => {
   stopSpeech();
@@ -113,7 +141,7 @@ export const playBase64Audio = (base64Data, textFallback, onEndCallback) => {
     const promise = audio.play();
     if (promise !== undefined) {
       promise.catch(err => {
-        console.warn("Base64 Audio play blocked by browser autoplay policy, using WebSpeech fallback:", err);
+        console.warn("Base64 Audio play blocked by browser, using emotional WebSpeech fallback:", err);
         if (textFallback) {
           fallbackWebSpeech(textFallback, fireCallback);
         } else {
